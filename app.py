@@ -1,56 +1,75 @@
 import streamlit as st
 import pandas as pd
+from pyvis.network import Network
+import streamlit.components.v1 as components
 
-# Configuración de la página web
 st.set_page_config(page_title="Radar DNCP - Paraguay", layout="wide")
 
-st.title("🕵️‍♂️ Radar de Contrataciones Públicas - Paraguay")
-st.markdown("Plataforma interactiva para detectar anomalías y redes de empresas vinculadas usando datos abiertos de la DNCP.")
+st.title("🕸️ Radar de Redes y Vínculos - DNCP Paraguay")
+st.markdown("Visualización de redes empresariales vinculadas por contactos telefónicos compartidos.")
 
-# Función para cargar y limpiar los datos (con caché para que vuele)
 @st.cache_data
 def cargar_datos():
     df = pd.read_csv('parties.csv', low_memory=False)
     df['tel_limpio'] = df['contactPoint_telephone'].astype(str).str.replace(r'\D', '', regex=True)
     return df
 
-# Mostramos un aviso de carga
-with st.spinner("Cargando y procesando la base de datos de proveedores..."):
+with st.spinner("Cargando base de datos..."):
     df_parties = cargar_datos()
 
-# Filtramos solo proveedores u oferentes
 proveedores = df_parties[df_parties['roles'].str.contains('supplier|tenderer', case=False, na=False)].copy()
 
-# Barra lateral (Sidebar) para controles interactivos
-st.sidebar.header("🛠️ Controles de Auditoría")
-min_empresas = st.sidebar.slider("Mínimo de empresas por teléfono compartido:", min_value=2, max_value=10, value=2)
+# Controles en la barra lateral
+st.sidebar.header("🛠️ Configuración del Grafo")
+min_empresas = st.sidebar.slider("Mínimo de empresas por teléfono:", min_value=2, max_value=6, value=2)
 
-# Procesamiento de duplicados por teléfono
 tel_validos = proveedores[(proveedores['tel_limpio'].str.len() >= 6) & (proveedores['tel_limpio'] != 'nan')]
 duplicados_tel = tel_validos[tel_validos.duplicated(subset=['tel_limpio'], keep=False)]
 
+# Filtramos los grupos según el slider
 resumen_alertas = duplicados_tel.groupby('tel_limpio').agg(
     cantidad_empresas=('identifier_id', 'count'),
-    nombres_empresas=('name', lambda x: ' | '.join(x.unique())),
+    nombres_empresas=('name', lambda x: list(x.unique())),
     ejemplo_direccion=('address_streetAddress', 'first')
 ).reset_index()
 
-# Aplicamos el filtro del slider
-resumen_filtrado = resumen_alertas[resumen_alertas['cantidad_empresas'] >= min_empresas]
+resumen_filtrado = resumen_alertas[resumen_filtrado_cond := (resumen_alertas['cantidad_empresas'] >= min_empresas)]
 
-# Métricas visuales arriba
-col1, col2 = st.columns(2)
-with col1:
-    st.metric("Total Proveedores Analizados", f"{len(proveedores):,}".replace(",", "."))
-with col2:
-    st.metric("Grupos con Teléfono Compartido", f"{len(resumen_filtrado):,}".replace(",", "."))
+st.metric("Clusters de Riesgo Detectados", len(resumen_filtrado))
 
 st.markdown("---")
-st.subheader("🚨 Listado de Empresas con Coincidencia Telefónica")
+st.subheader("🌐 Mapa Interactivo de Conexiones (Nodos)")
+st.markdown("Cada círculo central (rojo) representa un **número de teléfono compartido**, y los círculos secundarios (azules) son las **empresas** vinculadas a él. ¡Podés mover los nodos con el mouse!")
 
-# Tabla interactiva en la web
-st.dataframe(
-    resumen_filtrado.sort_values(by='cantidad_empresas', ascending=False),
-    use_container_width=True,
-    hide_index=True
-)
+# Generamos el Grafo con PyVis
+net = Network(height="600px", width="100%", bgcolor="#0e1117", font_color="white")
+net.barnes_hut() # Algoritmo de física para que los nodos se acomoden solos
+
+# Construimos la red visual
+for index, row in resumen_filtrado.iterrows():
+    tel = str(row['tel_limpio'])
+    nodo_tel_id = f"TEL: {tel}"
+    
+    # Nodo central del teléfono (Rojo)
+    net.add_node(nodo_tel_id, label=f"Tel: {tel}", color="#ff4b4b", size=25)
+    
+    # Nodos de las empresas vinculadas (Azul)
+    for empresa in row['nombres_empresas']:
+        net.add_node(empresa, label=empresa[:25] + "...", title=empresa, color="#1f77b4", size=15)
+        # Conectamos el teléfono con la empresa
+        net.add_edge(nodo_tel_id, empresa, color="#ffffff", width=1)
+
+# Guardamos el grafo en un archivo HTML temporal para renderizarlo en Streamlit
+try:
+    net.save_graph("grafo_cluster.html")
+    with open("grafo_cluster.html", 'r', encoding='utf-8') as f:
+        html_code = f.read()
+    components.html(html_code, height=620)
+except Exception as e:
+    st.error(f"Error al generar el grafo visual: {e}")
+
+st.markdown("---")
+st.subheader("📋 Detalle de Datos Tabulares")
+st.dataframe(resumen_filtrado[['tel_limpio', 'cantidad_empresas', 'ejemplo_direccion']].assign(
+    empresas=resumen_filtrado['nombres_empresas'].apply(lambda x: " | ".join(x))
+), use_container_width=True, hide_index=True)
